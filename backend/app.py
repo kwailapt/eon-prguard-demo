@@ -4,16 +4,17 @@ import os
 
 app = Flask(__name__)
 
-# VULNERABILITY: SQL injection (will be fixed in PR #1)
+STRIPE_SECRET = os.environ.get('STRIPE_SECRET')
+STRIPE_PUBLISHABLE = os.environ.get('STRIPE_PUBLISHABLE')
+
 @app.route('/user')
 def get_user():
     user_id = request.args.get('id')
     conn = sqlite3.connect('users.db')
-    query = "SELECT * FROM users WHERE id = " + user_id
-    result = conn.execute(query).fetchone()
+    query = "SELECT * FROM users WHERE id = ?"
+    result = conn.execute(query, (user_id,)).fetchone()
     return jsonify({'user': result})
 
-# VULNERABILITY: missing error handling
 @app.route('/users')
 def list_users():
     conn = sqlite3.connect('users.db')
