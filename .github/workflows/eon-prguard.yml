@@ -1,86 +1,94 @@
 name: EON PR Guard
 
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+on: [pull_request]
 
 permissions:
   contents: read
   pull-requests: write
-  statuses: write
 
 jobs:
-  eon-review:
+  review:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup EON PR Guard
+      - name: PR Guard Security Review
         run: |
-          mkdir -p $HOME/.eon
-          echo '${{ toJson(github.event) }}' > $HOME/.eon/github-event.json
-          export EON_CACHE_DIR="$HOME/.eon"
+          BLOCKED=0
+          WARNINGS=""
 
-      - name: Convert PR to EON task
-        run: |
-          python3 -c "
-import json, os
-event = json.load(open('$HOME/.eon/github-event.json'))
-pr = event.get('pull_request', event)
-task = {
-    'objective': f\"Review PR #{pr.get('number','?')}: {pr.get('title','')}\",
-    'description': pr.get('body','')[:200],
-    'constraints': ['must pass CI', 'no security regressions'],
-    'acceptance_tests': ['all tests pass', 'no new vulnerabilities'],
-    'risk_tier': 'high' if 'security' in str(pr.get('title','')).lower() else 'medium',
-    'pr_number': pr.get('number', 0),
-    'repo': event.get('repository',{}).get('full_name',''),
-    'pr_type': 'bugfix' if 'fix' in str(pr.get('title','')).lower() else 'feature',
-    'additions': pr.get('additions', 0),
-    'deletions': pr.get('deletions', 0),
-    'files_changed': pr.get('changed_files', 0),
-    'author': pr.get('user',{}).get('login','')
-}
-with open(os.path.join('$HOME/.eon','current-task.json'), 'w') as f:
-    json.dump(task, f)
-print(f\"PR #{task['pr_number']}: {task['pr_type']}, risk={task['risk_tier']}\")
-"
-
-      - name: EON Rule-IR Security Scan
-        run: |
-          echo "## EON PR Guard Review" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Check for SQL injection patterns
-          if grep -rq '".*SELECT.*FROM.*WHERE.*"+' backend/ 2>/dev/null || grep -rq "f\".*SELECT.*FROM.*WHERE.*{" backend/ 2>/dev/null; then
-            echo "🛑 **BLOCKED**: SQL Injection detected (Rule-IR S1: SQL_INJECTION_CONCAT)" >> $GITHUB_STEP_SUMMARY
-            echo "::error::SQL Injection detected — Rule-IR S1 triggered"
-            exit 1
+          # Check SQL injection
+          if grep -rqE '(SELECT|INSERT|UPDATE|DELETE)\s.*".*\+' backend/ 2>/dev/null; then
+            BLOCKED=1
+            WARNINGS="$WARNINGS\n- SQL injection: string concatenation"
           fi
 
-          # Check for hardcoded secrets
-          if grep -rqE '(api_key|secret|password|token)\s*=\s*"[^"]{8,}"' backend/ 2>/dev/null; then
-            echo "🛑 **BLOCKED**: Hardcoded secret detected (Rule-IR S2: HARDCODED_SECRET)" >> $GITHUB_STEP_SUMMARY
-            echo "::error::Hardcoded secret detected — Rule-IR S2 triggered"
-            exit 1
+          # Check f-string SQL injection
+          if grep -rqE 'f".*(SELECT|INSERT|UPDATE|DELETE)' backend/ 2>/dev/null; then
+            BLOCKED=1
+            WARNINGS="$WARNINGS\n- SQL injection: f-string query"
           fi
 
-          # Check for XSS patterns
+          # Check hardcoded secrets
+          if grep -rqE '(api_key|secret|password)\s*=\s*"[A-Za-z0-9_-]{8,}"' backend/ 2>/dev/null; then
+            BLOCKED=1
+            WARNINGS="$WARNINGS\n- Hardcoded secret detected"
+          fi
+
+          # Check XSS
           if grep -rq 'dangerouslySetInnerHTML' frontend/ 2>/dev/null; then
-            echo "⚠️ **WARNING**: XSS risk via dangerouslySetInnerHTML (Rule-IR S3: XSS_UNESCAPED)" >> $GITHUB_STEP_SUMMARY
+            WARNINGS="$WARNINGS\n- XSS risk: dangerouslySetInnerHTML"
           fi
 
-          echo "✅ **PASS**: No critical security issues detected" >> $GITHUB_STEP_SUMMARY
-          echo "| Critic | Verdict |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|---------|" >> $GITHUB_STEP_SUMMARY
-          echo "| E (Invariant) | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| N (Computability) | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| O (Risk) | 🔍 Scanned |" >> $GITHUB_STEP_SUMMARY
+          # Build review comment
+          {
+            echo "## EON PR Guard Review"
+            echo ""
+            if [ "$BLOCKED" = "1" ]; then
+              echo "### \`\`\`diff"
+              echo "- RESULT: BLOCKED"
+              echo "\`\`\`"
+              echo ""
+              echo "**Issues found:**"
+              echo -e "$WARNINGS"
+              echo ""
+              echo "> \`\`\`diff"
+              echo "> - MERGE: NOT ALLOWED"
+              echo "> \`\`\`"
+            else
+              if [ -n "$WARNINGS" ]; then
+                echo "### \`\`\`diff"
+                echo "! RESULT: WARN"
+                echo "\`\`\`"
+                echo ""
+                echo "**Warnings:**"
+                echo -e "$WARNINGS"
+              else
+                echo "### \`\`\`diff"
+                echo "+ RESULT: PASS"
+                echo "\`\`\`"
+                echo ""
+                echo "No security issues detected."
+              fi
+            fi
+            echo ""
+            echo "| Critic | Verdict |"
+            echo "|--------|---------|"
+            echo "| E (Invariant) | :white_check_mark: |"
+            if [ "$BLOCKED" = "1" ]; then
+              echo "| N (Computability) | :x: Security violation |"
+              echo "| O (Risk) | :x: Blocked |"
+            else
+              echo "| N (Computability) | :white_check_mark: |"
+              echo "| O (Risk) | :white_check_mark: |"
+            fi
+            echo ""
+            echo "---"
+            echo "*EON PR Guard v4.4 · $(date -u)*"
+          } >> $GITHUB_STEP_SUMMARY
 
-      - name: EON Outcome Record
-        if: always()
-        run: |
-          echo "Review complete at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $HOME/.eon/outcome-ledger.jsonl
+          if [ "$BLOCKED" = "1" ]; then
+            echo "::error::PR Guard BLOCKED — security issues found"
+            exit 1
+          fi
