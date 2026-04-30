@@ -1,8 +1,6 @@
 name: EON PR Guard
 
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+on: [pull_request]
 
 permissions:
   contents: read
@@ -11,90 +9,86 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
 
-      - name: Security Scan — SQL Injection
-        id: sql
-        continue-on-error: true
+      - name: PR Guard Security Review
         run: |
-          if grep -rqE '(SELECT|INSERT|UPDATE|DELETE).*".*\+' backend/ 2>/dev/null; then
-            echo "BLOCKED=1" >> $GITHUB_OUTPUT
-            echo "REASON=SQL injection pattern detected" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          if grep -rqE 'f".*(SELECT|INSERT|UPDATE|DELETE).*\{' backend/ 2>/dev/null; then
-            echo "BLOCKED=1" >> $GITHUB_OUTPUT
-            echo "REASON=SQL injection via f-string detected" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          echo "BLOCKED=0" >> $GITHUB_OUTPUT
+          BLOCKED=0
+          WARNINGS=""
 
-      - name: Security Scan — Hardcoded Secrets
-        id: secrets
-        continue-on-error: true
-        run: |
-          if grep -rqE '(api_key|secret|password|token)\s*=\s*"[A-Za-z0-9_-]{8,}"' backend/ 2>/dev/null; then
-            echo "BLOCKED=1" >> $GITHUB_OUTPUT
-            echo "REASON=Hardcoded secret detected" >> $GITHUB_OUTPUT
-            exit 1
+          # Check SQL injection
+          if grep -rqE '(SELECT|INSERT|UPDATE|DELETE)\s.*".*\+' backend/ 2>/dev/null; then
+            BLOCKED=1
+            WARNINGS="$WARNINGS\n- SQL injection: string concatenation"
           fi
-          echo "BLOCKED=0" >> $GITHUB_OUTPUT
 
-      - name: Security Scan — XSS
-        id: xss
-        continue-on-error: true
-        run: |
+          # Check f-string SQL injection
+          if grep -rqE 'f".*(SELECT|INSERT|UPDATE|DELETE)' backend/ 2>/dev/null; then
+            BLOCKED=1
+            WARNINGS="$WARNINGS\n- SQL injection: f-string query"
+          fi
+
+          # Check hardcoded secrets
+          if grep -rqE '(api_key|secret|password)\s*=\s*"[A-Za-z0-9_-]{8,}"' backend/ 2>/dev/null; then
+            BLOCKED=1
+            WARNINGS="$WARNINGS\n- Hardcoded secret detected"
+          fi
+
+          # Check XSS
           if grep -rq 'dangerouslySetInnerHTML' frontend/ 2>/dev/null; then
-            echo "WARN=1" >> $GITHUB_OUTPUT
+            WARNINGS="$WARNINGS\n- XSS risk: dangerouslySetInnerHTML"
           fi
 
-      - name: Post Review Result
-        if: always()
-        run: |
-          SQL_BLOCKED="${sql_BLOCKED:-0}"
-          SECRET_BLOCKED="${secrets_BLOCKED:-0}"
+          # Build review comment
+          {
+            echo "## EON PR Guard Review"
+            echo ""
+            if [ "$BLOCKED" = "1" ]; then
+              echo "### \`\`\`diff"
+              echo "- RESULT: BLOCKED"
+              echo "\`\`\`"
+              echo ""
+              echo "**Issues found:**"
+              echo -e "$WARNINGS"
+              echo ""
+              echo "> \`\`\`diff"
+              echo "> - MERGE: NOT ALLOWED"
+              echo "> \`\`\`"
+            else
+              if [ -n "$WARNINGS" ]; then
+                echo "### \`\`\`diff"
+                echo "! RESULT: WARN"
+                echo "\`\`\`"
+                echo ""
+                echo "**Warnings:**"
+                echo -e "$WARNINGS"
+              else
+                echo "### \`\`\`diff"
+                echo "+ RESULT: PASS"
+                echo "\`\`\`"
+                echo ""
+                echo "No security issues detected."
+              fi
+            fi
+            echo ""
+            echo "| Critic | Verdict |"
+            echo "|--------|---------|"
+            echo "| E (Invariant) | :white_check_mark: |"
+            if [ "$BLOCKED" = "1" ]; then
+              echo "| N (Computability) | :x: Security violation |"
+              echo "| O (Risk) | :x: Blocked |"
+            else
+              echo "| N (Computability) | :white_check_mark: |"
+              echo "| O (Risk) | :white_check_mark: |"
+            fi
+            echo ""
+            echo "---"
+            echo "*EON PR Guard v4.4 · $(date -u)*"
+          } >> $GITHUB_STEP_SUMMARY
 
-          echo "## EON PR Guard Review" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          if [ "$SQL_BLOCKED" = "1" ]; then
-            echo "🛑 **BLOCKED**: SQL Injection (Rule-IR S1)" >> $GITHUB_STEP_SUMMARY
-            echo "::error::SQL Injection — Rule-IR S1 triggered"
+          if [ "$BLOCKED" = "1" ]; then
+            echo "::error::PR Guard BLOCKED — security issues found"
+            exit 1
           fi
-
-          if [ "$SECRET_BLOCKED" = "1" ]; then
-            echo "🛑 **BLOCKED**: Hardcoded Secret (Rule-IR S2)" >> $GITHUB_STEP_SUMMARY
-            echo "::error::Hardcoded Secret — Rule-IR S2 triggered"
-          fi
-
-          if [ "${xss_WARN:-0}" = "1" ]; then
-            echo "⚠️ **WARN**: XSS risk via dangerouslySetInnerHTML (Rule-IR S3)" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if [ "$SQL_BLOCKED" = "0" ] && [ "$SECRET_BLOCKED" = "0" ]; then
-            echo "✅ **PASS**: No critical security issues" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Critic | Verdict |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|---------|" >> $GITHUB_STEP_SUMMARY
-
-          if [ "$SQL_BLOCKED" = "1" ]; then
-            echo "| E (Invariant) | ✅ |" >> $GITHUB_STEP_SUMMARY
-            echo "| N (Computability) | 🛑 SQL Injection |" >> $GITHUB_STEP_SUMMARY
-            echo "| O (Risk) | 🛑 Blocked |" >> $GITHUB_STEP_SUMMARY
-          elif [ "$SECRET_BLOCKED" = "1" ]; then
-            echo "| E (Invariant) | ✅ |" >> $GITHUB_STEP_SUMMARY
-            echo "| N (Computability) | ✅ |" >> $GITHUB_STEP_SUMMARY
-            echo "| O (Risk) | 🛑 Hardcoded Secret |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| E (Invariant) | ✅ |" >> $GITHUB_STEP_SUMMARY
-            echo "| N (Computability) | ✅ |" >> $GITHUB_STEP_SUMMARY
-            echo "| O (Risk) | ✅ |" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*EON PR Guard v4.4 | $(date -u +%Y-%m-%dT%H:%M:%SZ)*" >> $GITHUB_STEP_SUMMARY
