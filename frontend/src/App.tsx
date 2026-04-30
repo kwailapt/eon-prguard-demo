@@ -2,14 +2,14 @@ function App() {
   return (
     <div className="App">
       <h1>EON PR Guard Demo</h1>
-      <UserProfile bio="<script>alert('xss')</script>Hello World" />
+      <UserProfile bio="Hello World — safe rendering" />
     </div>
   );
 }
 
-// VULNERABILITY: XSS via dangerouslySetInnerHTML (will be fixed in PR #8)
+// FIXED: removed dangerouslySetInnerHTML
 function UserProfile({ bio }: { bio: string }) {
-  return <div dangerouslySetInnerHTML={{ __html: bio }} />;
+  return <div>{bio}</div>;
 }
 
 export default App;
