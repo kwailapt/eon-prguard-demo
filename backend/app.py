@@ -1,24 +1,22 @@
 from flask import Flask, request, jsonify
-import sqlite3
+from models import UserRepository
 import os
 
 app = Flask(__name__)
+repo = UserRepository()
 
-# VULNERABILITY: SQL injection (will be fixed in PR #1)
+STRIPE_SECRET = os.environ.get('STRIPE_SECRET')
+
 @app.route('/user')
 def get_user():
     user_id = request.args.get('id')
-    conn = sqlite3.connect('users.db')
-    query = "SELECT * FROM users WHERE id = " + user_id
-    result = conn.execute(query).fetchone()
-    return jsonify({'user': result})
+    user = repo.find_by_id(int(user_id))
+    return jsonify({'user': str(user)})
 
-# VULNERABILITY: missing error handling
 @app.route('/users')
 def list_users():
-    conn = sqlite3.connect('users.db')
-    result = conn.execute("SELECT * FROM users").fetchall()
-    return jsonify({'users': result})
+    users = repo.list_all()
+    return jsonify({'users': [str(u) for u in users]})
 
 if __name__ == '__main__':
     app.run(debug=True)
